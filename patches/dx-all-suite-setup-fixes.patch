@@ -1,0 +1,131 @@
+From 9673ee93651620d0fbcf7dd65b579ca24efe2d1a Mon Sep 17 00:00:00 2001
+From: Dvir <dvir.chakim@gmail.com>
+Date: Thu, 5 Nov 2026 21:26:02 +0200
+Subject: [PATCH 1/2] fix(studio): report installed runtime version and judge
+ demo steps by demo_ok
+
+On the iMDT V2H + DX-M1M demonstration image the Setup page misreported
+installed state in two places:
+
+- versions.dx_runtime read the umbrella dx-runtime/release.ver (source
+  snapshot v2.5.0) while the installed DX-RT component is v3.5.0. Now
+  reads dx_rt/release.ver, matching dx-rt-deps and get_sysinfo().
+- dx-app-build/dx-app-setup were painted todo unless the FULL contract
+  was met (all 497 zoo models ~45GB) even though their Quick Start run
+  form is demo-only (build.sh --minimal / asset_setup --demo). The list
+  now judges these steps by demo_ok, same as quick_start_plan().
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ dx-ai-studio/dx_app/core/setup_steps.py | 5 ++++-
+ dx-ai-studio/dx_app/static/js/setup.js  | 6 +++++-
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/dx-ai-studio/dx_app/core/setup_steps.py b/dx-ai-studio/dx_app/core/setup_steps.py
+index 94efc85..f800845 100644
+--- a/dx-ai-studio/dx_app/core/setup_steps.py
++++ b/dx-ai-studio/dx_app/core/setup_steps.py
+@@ -343,7 +343,10 @@ def setup_status():
+         r["inference-venv"]={"ok":False,"detail":f"probe failed: {_e}"}
+     r["versions"] = {
+         "dx_app": _read_release_ver("release.ver"),
+-        "dx_runtime": _read_release_ver(str(DX_RT_ROOT.parent / "release.ver")),
++        # dx_runtime = installed DX-RT component version (dx_rt/release.ver), same
++        # marker the dx-rt-deps check and get_sysinfo()'s dx_rt_version read — not
++        # the umbrella dx-runtime repo release.ver, which tracks the source snapshot.
++        "dx_runtime": _read_release_ver(str(DX_RT_ROOT / "release.ver")),
+         "npu_driver": _get_npu_driver_version(),
+         "compiler": _dxcom_version() or '--',
+         "kernel": platform.release(),
+diff --git a/dx-ai-studio/dx_app/static/js/setup.js b/dx-ai-studio/dx_app/static/js/setup.js
+index 67f5b7e..e1c2d6d 100644
+--- a/dx-ai-studio/dx_app/static/js/setup.js
++++ b/dx-ai-studio/dx_app/static/js/setup.js
+@@ -103,7 +103,11 @@ async function setupCheckAll(){
+       /* Facts (s.detail) show as chips in the row; the line below holds only other words (just completed). */
+       if(det)det.textContent=(locallyDone&&!s.ok)?_T5('방금 완료됨','Completed just now','完了したばかり','刚刚完成','剛剛完成','Completado ahora mismo'):'';
+       /* Badge, next step and bar are painted by the shared step list (shared/static/dx-steps.js). One row holds short facts only. */
+-      _setupStepState(id,(s.ok||locallyDone)?'done':'todo',_setupFacts(s.detail));
++      /* Demo-form steps are judged by demo_ok (same as quick_start_plan / _DEMO_FORM_STEPS):
++         their run form is build.sh --minimal / asset_setup --demo, so the full contract
++         (e.g. all 497 zoo models) is not the promise the demo setup page makes. */
++      var _ok=(id==='dx-app-build'||id==='dx-app-setup')?(s.demo_ok!==undefined?s.demo_ok:s.ok):s.ok;
++      _setupStepState(id,(_ok||locallyDone)?'done':'todo',_setupFacts(s.detail));
+       /* Present files without a Studio record are installed but unverified: offer Verify
+          (the same step checks each file's size against the server and keeps a matching one). */
+       if(id==='dx-app-setup'){
+-- 
+2.47.1.windows.1
+
+
+From 9241830ac6223a6a36607067b59b189045089a28 Mon Sep 17 00:00:00 2001
+From: Dvir <dvir.chakim@gmail.com>
+Date: Sun, 8 Nov 2026 13:28:18 +0200
+Subject: [PATCH 2/2] fix(studio): treat loaded non-DKMS driver as healthy;
+ measure disk on suite fs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Embedded/Yocto images install dxrt modules into /lib/modules and load them
+via modprobe/systemd — there is no dkms binary, so the diagnostics reported
+a false failure. If dxrt_driver/dxrt is loaded, the DKMS check now passes
+with an explicit "non-DKMS install" detail.
+
+The disk-space check measured "/" (a 2 GB rootfs on embedded images) while
+everything the suite installs lands under DX_APP_ROOT on the data partition.
+It now measures the filesystem containing DX_APP_ROOT and reports the path.
+---
+ dx-ai-studio/dx_app/core/setup_steps.py | 24 +++++++++++++++++++-----
+ 1 file changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/dx-ai-studio/dx_app/core/setup_steps.py b/dx-ai-studio/dx_app/core/setup_steps.py
+index f800845..0f55304 100644
+--- a/dx-ai-studio/dx_app/core/setup_steps.py
++++ b/dx-ai-studio/dx_app/core/setup_steps.py
+@@ -408,8 +408,18 @@ def deep_diagnostics():
+             "detail":"; ".join(dxrt_dkms)[:200] if dxrt_dkms else "No DKMS entry for dxrt/deepx",
+             "fix":{"ko":"cd dx-runtime && sudo ./install.sh --target=dx_rt_npu_linux_driver","en":"cd dx-runtime && sudo ./install.sh --target=dx_rt_npu_linux_driver","ja":"cd dx-runtime && sudo ./install.sh --target=dx_rt_npu_linux_driver","zhCN":"cd dx-runtime && sudo ./install.sh --target=dx_rt_npu_linux_driver","zhTW":"cd dx-runtime && sudo ./install.sh --target=dx_rt_npu_linux_driver","es":"cd dx-runtime && sudo ./install.sh --target=dx_rt_npu_linux_driver"}})
+     except FileNotFoundError:
+-        checks.append({"id":"dkms","label":{"ko":"DKMS 드라이버 상태","en":"DKMS Driver Status","ja":"DKMSドライバ状態","zhCN":"DKMS驱动状态","zhTW":"DKMS驅動狀態","es":"Estado del driver DKMS"},"ok":False,
+-            "detail":"dkms not installed","fix":{"ko":"sudo apt install dkms","en":"sudo apt install dkms","ja":"sudo apt install dkms","zhCN":"sudo apt install dkms","zhTW":"sudo apt install dkms","es":"sudo apt install dkms"}})
++        # DKMS is a Debian rebuild mechanism — Yocto/other images install the
++        # modules straight into /lib/modules and load them via modprobe/systemd.
++        # The check's real intent is "driver properly installed": if the modules
++        # are already loaded, a missing dkms binary is not a failure.
++        try:
++            _mods=subprocess.check_output(["lsmod"],text=True,timeout=5)
++        except Exception:
++            _mods=locals().get("lsmod","")
++        _drv_loaded="dxrt_driver" in _mods or "dxrt" in _mods
++        checks.append({"id":"dkms","label":{"ko":"DKMS 드라이버 상태","en":"DKMS Driver Status","ja":"DKMSドライバ状態","zhCN":"DKMS驱动状态","zhTW":"DKMS驅動狀態","es":"Estado del driver DKMS"},"ok":_drv_loaded,
++            "detail":"DKMS absent — driver installed & loaded via /lib/modules (non-DKMS install)" if _drv_loaded else "dkms not installed",
++            "fix":{} if _drv_loaded else {"ko":"sudo apt install dkms","en":"sudo apt install dkms","ja":"sudo apt install dkms","zhCN":"sudo apt install dkms","zhTW":"sudo apt install dkms","es":"sudo apt install dkms"}})
+     except Exception as e:
+         checks.append({"id":"dkms","label":{"ko":"DKMS 드라이버 상태","en":"DKMS Driver Status","ja":"DKMSドライバ状態","zhCN":"DKMS驱动状态","zhTW":"DKMS驅動狀態","es":"Estado del driver DKMS"},"ok":False,"detail":str(e)})
+ 
+@@ -449,12 +459,16 @@ def deep_diagnostics():
+             "zhTW":f"執行 Setup 頁面的「DX-Runtime Build」步驟（或在終端機中: {_venv_fix}）",
+             "es":f"Ejecute el paso «DX-Runtime Build» en la página de configuración (o en una terminal: {_venv_fix})"}})
+ 
+-    # 9. Disk Space — at least 5GB free
++    # 9. Disk Space — at least 5GB free on the filesystem that hosts the suite
++    # (models/videos/builds land under DX_APP_ROOT). On embedded images "/" is a
++    # small rootfs while the suite lives on a separate data partition — measuring
++    # "/" would fail forever; on a normal PC install both are the same fs.
+     try:
+-        du=shutil.disk_usage("/")
++        _df_path=Path(DX_APP_ROOT) if Path(DX_APP_ROOT).exists() else Path("/")
++        du=shutil.disk_usage(_df_path)
+         free_gb=du.free/1e9
+         checks.append({"id":"disk_space","label":{"ko":"디스크 공간 (≥5GB 여유)","en":"Disk Space (≥5GB free)","ja":"ディスク容量 (≥5GB空き)","zhCN":"磁盘空间 (≥5GB空闲)","zhTW":"磁碟空間 (≥5GB可用)","es":"Espacio en disco (≥5 GB libres)"},"ok":free_gb>=5.0,
+-            "detail":f"{free_gb:.1f} GB free / {du.total/1e9:.0f} GB total",
++            "detail":f"{free_gb:.1f} GB free / {du.total/1e9:.0f} GB total ({_df_path})",
+             "fix":{"ko":"디스크 공간 확보 (빌드 산출물, 로그 등 정리)","en":"Free up disk space (clear build artifacts, logs, etc.)","ja":"ディスク容量を確保 (ビルド成果物、ログ等を削除)","zhCN":"释放磁盘空间 (清理构建产物、日志等)","zhTW":"釋放磁碟空間 (清理建置產物、日誌等)","es":"Libere espacio en disco (artefactos de compilación, registros, etc.)"}})
+     except Exception as e:
+         checks.append({"id":"disk_space","label":{"ko":"디스크 공간","en":"Disk Space","ja":"ディスク容量","zhCN":"磁盘空间","zhTW":"磁碟空間","es":"Espacio en disco"},"ok":False,"detail":str(e)})
+-- 
+2.47.1.windows.1
+

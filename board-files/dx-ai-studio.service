@@ -1,0 +1,19 @@
+[Unit]
+Description=DEEPX DX AI Studio (web UI on port 8080)
+After=network.target imdt-m2-bringup.service dxrt.service
+Wants=dxrt.service
+RequiresMountsFor=/opt/containers
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/containers/dx-ai-studio
+Environment=HOME=/root
+Environment=PATH=/opt/containers/tools/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash /opt/containers/dx-ai-studio/launcher.sh --port 8080 --no-browser --fast
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

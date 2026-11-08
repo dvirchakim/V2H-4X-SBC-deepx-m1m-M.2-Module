@@ -1,0 +1,44 @@
+# Build artifacts & binary bundles (go to GitHub Releases, not git)
+*.tgz
+*.tar.gz
+*.zip
+*.deb
+*.log
+
+# Sysroot stage archives & extracted trees (rebuilt per build)
+stage_*
+board_stage.tgz
+rt350_stage.tgz
+prebuilt/
+drv/
+dx_rt_src/
+shim/
+
+# Build outputs
+out/
+out350/
+out_*/
+dist/
+dist350/
+builddir/
+*.o
+*.a
+
+# Extracted dependency trees (symlinks, per-build)
+xvfb_*/
+nice/
+bad/
+srtp/
+
+# Release staging (content lives in repo; binaries via Releases)
+release_*/
+dx-studio-*.zip
+
+# Test result images
+*.jpg
+*.jpeg
+*.png
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
