@@ -8,6 +8,7 @@ RequiresMountsFor=/opt/containers
 Type=simple
 WorkingDirectory=/opt/containers/dx-ai-studio
 Environment=HOME=/root
+Environment=DX_REMOTE_AUTH=off
 Environment=PATH=/opt/containers/tools/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/bin/bash /opt/containers/dx-ai-studio/launcher.sh --port 8080 --no-browser --fast
 Restart=on-failure

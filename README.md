@@ -132,9 +132,11 @@ images:
 - disk space measured on the filesystem containing `DX_APP_ROOT`, not `/`
 - CRU camera prep in `PipelineManager.start()` — media-pipe init + caps
   injection so MIPI cameras just work (see Cameras above)
+- `DX_REMOTE_AUTH=off` disables the remote pairing gate entirely — remote
+  browsers open the dashboard directly (enabled in `dx-ai-studio.service`)
 
 Upstream commits in `dx-all-suite` (local): `v1.0` = `9673ee9`, then
-`9241830`, `8c1942b`, `ab15cef`.
+`9241830`, `8c1942b`, `ab15cef`, `8ecb423`.
 
 ## Verified behaviour
 

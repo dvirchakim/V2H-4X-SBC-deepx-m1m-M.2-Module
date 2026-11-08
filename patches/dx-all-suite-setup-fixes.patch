@@ -1,7 +1,7 @@
 From 9673ee93651620d0fbcf7dd65b579ca24efe2d1a Mon Sep 17 00:00:00 2001
 From: Dvir <dvir.chakim@gmail.com>
 Date: Thu, 5 Nov 2026 21:26:02 +0200
-Subject: [PATCH 1/4] fix(studio): report installed runtime version and judge
+Subject: [PATCH 1/5] fix(studio): report installed runtime version and judge
  demo steps by demo_ok
 
 On the iMDT V2H + DX-M1M demonstration image the Setup page misreported
@@ -63,7 +63,7 @@ index 67f5b7e..e1c2d6d 100644
 From 9241830ac6223a6a36607067b59b189045089a28 Mon Sep 17 00:00:00 2001
 From: Dvir <dvir.chakim@gmail.com>
 Date: Sun, 8 Nov 2026 13:28:18 +0200
-Subject: [PATCH 2/4] fix(studio): treat loaded non-DKMS driver as healthy;
+Subject: [PATCH 2/5] fix(studio): treat loaded non-DKMS driver as healthy;
  measure disk on suite fs
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -133,7 +133,7 @@ index f800845..0f55304 100644
 From 8c1942b89ddd4d93f9a30d2c0715ab58cd11c7f0 Mon Sep 17 00:00:00 2001
 From: Dvir <dvir.chakim@gmail.com>
 Date: Sun, 8 Nov 2026 13:54:37 +0200
-Subject: [PATCH 3/4] feat(stream): prepare CRU camera pipelines before
+Subject: [PATCH 3/5] feat(stream): prepare CRU camera pipelines before
  parse_launch
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -285,7 +285,7 @@ index 2ea95d6..a1cc8af 100644
 From ab15cef68e3e55ce1b0bf725fe3ec8c8fa1d05dd Mon Sep 17 00:00:00 2001
 From: Dvir <dvir.chakim@gmail.com>
 Date: Sun, 8 Nov 2026 14:04:44 +0200
-Subject: [PATCH 4/4] fix(stream): resolve v4l2 device symlinks in CRU media
+Subject: [PATCH 4/5] fix(stream): resolve v4l2 device symlinks in CRU media
  lookup
 
 Video indices are unstable across boots (UVC may probe before CRU), so
@@ -322,6 +322,93 @@ index a1cc8af..c5389ab 100644
                  return str(mp)
          except Exception:
              continue
+-- 
+2.47.1.windows.1
+
+
+From 8ecb4234e7c0796e16bd617e9b22e24c3c3a3ac2 Mon Sep 17 00:00:00 2001
+From: dvirchakim <dvirchakim@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 15:10:20 +0200
+Subject: [PATCH 5/5] feat(studio): DX_REMOTE_AUTH=off disables the remote
+ pairing gate
+
+_enforce_auth passes all peers when off; launcher skips RemoteAccess
+(no pairing code, no sessions file); /api/auth/status reports
+auth_enabled=false/authenticated=true so the dashboard loads directly.
+For closed demo/lab images; default stays on.
+---
+ dx-ai-studio/launcher/launcher.py    | 11 +++++++----
+ dx-ai-studio/shared/dx_server.py     |  4 ++++
+ dx-ai-studio/shared/remote_access.py |  7 +++++++
+ 3 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/dx-ai-studio/launcher/launcher.py b/dx-ai-studio/launcher/launcher.py
+index c8bf5ea..37d1221 100644
+--- a/dx-ai-studio/launcher/launcher.py
++++ b/dx-ai-studio/launcher/launcher.py
+@@ -1586,12 +1586,14 @@ class LauncherHandler(DXBaseHandler):
+ 
+     def _handle_auth_status(self):
+         local = self._is_local()
++        auth_on = _ra.remote_auth_enabled()
+         payload = {
+             "ok": True,
+-            "auth_enabled": not local,
++            "auth_enabled": auth_on and not local,
+             "locked": False,
+             "local": local,
+-            "authenticated": local or getattr(self, "auth_kind", None) in ("token", "session")
++            "authenticated": local or not auth_on
++            or getattr(self, "auth_kind", None) in ("token", "session")
+             or bool(self._session()),
+             "pairing": REMOTE_ACCESS is not None and REMOTE_ACCESS.pairing is not None,
+         }
+@@ -1992,9 +1994,10 @@ def main():
+     # thread so the cosmetic boot below runs while the port already accepts connections.
+     threading.Thread(target=srv.serve_forever, name="launcher-http", daemon=True).start()
+ 
+-    # Remote browser pairing — skipped when bound to loopback only, since nothing remote can connect
++    # Remote browser pairing — skipped when bound to loopback only, since nothing remote can connect,
++    # and when remote auth is disabled (DX_REMOTE_AUTH=off: demo/lab image, no pairing gate at all)
+     global REMOTE_ACCESS
+-    if not (_bind_host in ("127.0.0.1", "::1", "localhost")):
++    if not (_bind_host in ("127.0.0.1", "::1", "localhost")) and _ra.remote_auth_enabled():
+         REMOTE_ACCESS = _ra.RemoteAccess()
+ 
+     # Unmissable, now-LIVE URL banner — safe to surface here because the port is bound.
+diff --git a/dx-ai-studio/shared/dx_server.py b/dx-ai-studio/shared/dx_server.py
+index 06dbd1d..fb24813 100644
+--- a/dx-ai-studio/shared/dx_server.py
++++ b/dx-ai-studio/shared/dx_server.py
+@@ -1067,6 +1067,10 @@ class DXBaseHandler(SimpleHTTPRequestHandler):
+     def _enforce_auth(self) -> bool:
+         """True when the request was refused. Local passes; remote needs DX_API_TOKEN or a pairing session (cookie)."""
+         self.auth_kind = None
++        from shared.remote_access import remote_auth_enabled
++        if not remote_auth_enabled():
++            self.auth_kind = "off"
++            return False
+         if self._is_local():
+             self.auth_kind = "local"
+             return False
+diff --git a/dx-ai-studio/shared/remote_access.py b/dx-ai-studio/shared/remote_access.py
+index 5152997..012c086 100644
+--- a/dx-ai-studio/shared/remote_access.py
++++ b/dx-ai-studio/shared/remote_access.py
+@@ -28,6 +28,13 @@ from typing import Callable, Optional
+ SESSION_COOKIE = "dx_session"
+ 
+ 
++def remote_auth_enabled() -> bool:
++    """False when DX_REMOTE_AUTH=off — the studio opens to the LAN with no pairing gate.
++
++    For closed demo/lab images only: anyone who can reach the port gets full access."""
++    return os.environ.get("DX_REMOTE_AUTH", "on").strip().lower() not in ("off", "0", "false", "no")
++
++
+ # ── Host ──────────────────────────────────────────────────────────────────────
+ 
+ def _split_host(host_header: str) -> str:
 -- 
 2.47.1.windows.1
 
