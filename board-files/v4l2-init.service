@@ -1,0 +1,12 @@
+[Unit]
+Description=V4L2/CRU camera pipeline init (MIPI CSI-2, AP1302 kits)
+After=imdt-m2-bringup.service
+Before=dx-ai-studio.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/v4l2-init-all.sh 1920 1080
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

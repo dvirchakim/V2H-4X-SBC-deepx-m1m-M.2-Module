@@ -39,6 +39,35 @@ state — no false "missing" items.
 16/16 stream videos — all verified. The full 497-model zoo is intentionally not
 installed (~45 GB > the 25 GB partition); demo completeness is the criterion.
 
+## Cameras — MIPI ×2 + USB
+
+Verified working through the Studio's own pipeline manager (camera → dxinfer →
+NPU). Three sources:
+
+| Camera | Stable device path | Notes |
+|---|---|---|
+| MIPI CSI-2 #1 | `/dev/v4l/by-path/platform-16000000.video0-video-index4` | AP1302 ISP + AR1335 13 MP |
+| MIPI CSI-2 #2 | `/dev/v4l/by-path/platform-16010000.video1-video-index4` | AP1302 ISP + AR1335 13 MP |
+| USB (Brio 105) | `/dev/v4l/by-path/platform-15850000.usb-*` or `/dev/v4l/by-id/usb-046d_Brio_105_*` | UVC — negotiates on its own |
+
+`/dev/videoN` indices are **not stable across boots** (UVC may probe before CRU)
+— always use the `by-path`/`by-id` names in pipelines.
+
+The CRU nodes only stream when their media-ctl pad chain and the video-node
+format are one coherent size — unconstrained `v4l2src` negotiation picks a
+mismatched size and corrupts the node. Handled two ways:
+
+- **`v4l2-init.service`** (board-files): topology-driven boot init — finds every
+  `CRU output` media device and configures it at 1920x1080 before the Studio.
+- **Studio patch** (`_prepare_v4l2_sources`): every `v4l2src` on a CRU device
+  gets its pipe re-initialised at pipeline start, and a
+  `video/x-raw,format=UYVY,width=1920,height=1080` capsfilter is injected when
+  the pipeline doesn't already pin caps. Supported: 1280x720 / 1920x1080 /
+  4096x3072.
+
+In Pipeline Builder just drop a `v4l2src` element and set `device` to a
+by-path name — caps are optional.
+
 ## Quick start — reproduce on a fresh board
 
 Binary bundles are on the [**Releases**](../../releases) page
@@ -60,9 +89,12 @@ mkdir -p /opt/containers/xvfb
 tar -xzf xvfb_root.tgz -C /opt/containers/xvfb   # produces .../root
 install -m755 board-files/Xvfb /usr/local/bin/Xvfb
 
-# 4. Studio autostart
+# 4. Camera init + Studio autostart
+install -m755 board-files/v4l2-init.sh board-files/v4l2-init-all.sh /usr/local/bin/
+install -m644 board-files/v4l2-init.service /etc/systemd/system/
 install -m644 board-files/dx-ai-studio.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now dx-ai-studio
+systemctl daemon-reload
+systemctl enable --now v4l2-init dx-ai-studio
 
 # 5. Verify
 dxrt-cli -s                       # 3 NPUs @ 1 GHz
@@ -98,8 +130,11 @@ images:
 - demo-step `ok` judged by `demo_ok` (same rule as `quick_start_plan()`)
 - DKMS check passes when modules are loaded via `/lib/modules` (non-DKMS install)
 - disk space measured on the filesystem containing `DX_APP_ROOT`, not `/`
+- CRU camera prep in `PipelineManager.start()` — media-pipe init + caps
+  injection so MIPI cameras just work (see Cameras above)
 
-Upstream commits in `dx-all-suite` (local): `v1.0` = `9673ee9`, + `9241830`.
+Upstream commits in `dx-all-suite` (local): `v1.0` = `9673ee9`, then
+`9241830`, `8c1942b`, `ab15cef`.
 
 ## Verified behaviour
 

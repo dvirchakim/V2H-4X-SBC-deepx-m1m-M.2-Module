@@ -1,7 +1,7 @@
 From 9673ee93651620d0fbcf7dd65b579ca24efe2d1a Mon Sep 17 00:00:00 2001
 From: Dvir <dvir.chakim@gmail.com>
 Date: Thu, 5 Nov 2026 21:26:02 +0200
-Subject: [PATCH 1/2] fix(studio): report installed runtime version and judge
+Subject: [PATCH 1/4] fix(studio): report installed runtime version and judge
  demo steps by demo_ok
 
 On the iMDT V2H + DX-M1M demonstration image the Setup page misreported
@@ -63,7 +63,7 @@ index 67f5b7e..e1c2d6d 100644
 From 9241830ac6223a6a36607067b59b189045089a28 Mon Sep 17 00:00:00 2001
 From: Dvir <dvir.chakim@gmail.com>
 Date: Sun, 8 Nov 2026 13:28:18 +0200
-Subject: [PATCH 2/2] fix(studio): treat loaded non-DKMS driver as healthy;
+Subject: [PATCH 2/4] fix(studio): treat loaded non-DKMS driver as healthy;
  measure disk on suite fs
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -126,6 +126,202 @@ index f800845..0f55304 100644
              "fix":{"ko":"디스크 공간 확보 (빌드 산출물, 로그 등 정리)","en":"Free up disk space (clear build artifacts, logs, etc.)","ja":"ディスク容量を確保 (ビルド成果物、ログ等を削除)","zhCN":"释放磁盘空间 (清理构建产物、日志等)","zhTW":"釋放磁碟空間 (清理建置產物、日誌等)","es":"Libere espacio en disco (artefactos de compilación, registros, etc.)"}})
      except Exception as e:
          checks.append({"id":"disk_space","label":{"ko":"디스크 공간","en":"Disk Space","ja":"ディスク容量","zhCN":"磁盘空间","zhTW":"磁碟空間","es":"Espacio en disco"},"ok":False,"detail":str(e)})
+-- 
+2.47.1.windows.1
+
+
+From 8c1942b89ddd4d93f9a30d2c0715ab58cd11c7f0 Mon Sep 17 00:00:00 2001
+From: Dvir <dvir.chakim@gmail.com>
+Date: Sun, 8 Nov 2026 13:54:37 +0200
+Subject: [PATCH 3/4] feat(stream): prepare CRU camera pipelines before
+ parse_launch
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Renesas CRU capture nodes (RZG2L_CRU — AP1302/AR1335 MIPI kits) only
+stream when the media-controller pad chain and the video node format
+are set to one coherent size, and v4l2src must request exactly that
+size. Unconstrained caps negotiation makes the driver pick a size the
+pad chain rejects: stream-on fails and the node keeps a stale format
+that breaks every later run.
+
+PipelineManager.start() now maps each v4l2src device to its media
+topology, re-inits the CRU pipe (sensor->CSI->cru-ip->node) at the
+requested size, and injects a UYVY/1920x1080 capsfilter when the
+pipeline does not already constrain the source. UVC cameras are
+untouched.
+---
+ dx-ai-studio/dx_stream/core/pipeline.py | 98 +++++++++++++++++++++++++
+ 1 file changed, 98 insertions(+)
+
+diff --git a/dx-ai-studio/dx_stream/core/pipeline.py b/dx-ai-studio/dx_stream/core/pipeline.py
+index 2ea95d6..a1cc8af 100644
+--- a/dx-ai-studio/dx_stream/core/pipeline.py
++++ b/dx-ai-studio/dx_stream/core/pipeline.py
+@@ -10,6 +10,8 @@ import ctypes.util
+ import logging
+ import math
+ import os
++import re
++import subprocess
+ import threading
+ import uuid
+ from pathlib import Path
+@@ -40,6 +42,101 @@ def _drain_dxrt_msgqueues():
+     except Exception:
+         pass
+ 
++# --- V4L2 camera preparation -------------------------------------------------
++# Renesas CRU capture nodes (RZG2L_CRU — e.g. AP1302/AR1335 MIPI kits) only
++# stream when their media-controller pad chain AND the video node format are
++# set to one coherent size; v4l2src must then request exactly that size.
++# Unconstrained negotiation makes the driver pick a size the pad chain rejects:
++# stream-on fails AND the node keeps a stale format, breaking later runs too.
++# UVC cameras negotiate normally and are left untouched.
++
++_CRU_DEFAULT_SIZE = (1920, 1080)
++
++
++def _cru_media_for(dev_node: str) -> str | None:
++    """Return the /dev/mediaX whose 'CRU output' entity is `dev_node`, else None."""
++    for mp in sorted(Path("/dev").glob("media*")):
++        try:
++            r = subprocess.run(
++                ["media-ctl", "-d", str(mp), "-e", "CRU output"],
++                capture_output=True, text=True, timeout=5)
++            if r.returncode == 0 and r.stdout.strip().split()[:1] == [dev_node]:
++                return str(mp)
++        except Exception:
++            continue
++    return None
++
++
++def _media_entity(media_dev: str, pattern: str) -> str | None:
++    try:
++        r = subprocess.run(["media-ctl", "-d", media_dev, "-p"],
++                           capture_output=True, text=True, timeout=5)
++    except Exception:
++        return None
++    for line in r.stdout.splitlines():
++        line = line.strip()
++        if line.startswith("- entity") and pattern in line:
++            m = re.match(r"- entity \d+: (.*?) \(", line)
++            if m:
++                return m.group(1)
++    return None
++
++
++def _cru_init(media_dev: str, dev_node: str, width: int, height: int) -> bool:
++    """Point the whole CRU pipe (ISP -> CSI -> cru-ip -> video node) at one size.
++    Idempotent — also repairs a node left with a stale format by a failed run."""
++    sensor = _media_entity(media_dev, "ap1302")
++    csi = _media_entity(media_dev, "csi-")
++    cru = _media_entity(media_dev, "cru-ip")
++    if not (sensor and csi and cru):
++        return False
++    fmt = f"YUYV8_1X16/{width}x{height} field:none colorspace:srgb"
++    try:
++        for ent in (sensor, csi, cru):
++            subprocess.run(["media-ctl", "-d", media_dev, "-V",
++                            f"'{ent}':0 [fmt:{fmt}]"], timeout=5, check=True)
++        subprocess.run(
++            ["v4l2-ctl", "-d", dev_node,
++             f"--set-fmt-video=width={width},height={height},pixelformat=UYVY"],
++            timeout=5, check=True)
++        log.info("CRU %s 초기화: %dx%d", dev_node, width, height)
++        return True
++    except Exception as e:
++        log.warning("CRU %s 초기화 %dx%d 실패: %s", dev_node, width, height, e)
++        return False
++
++
++def _prepare_v4l2_sources(pipeline_str: str) -> str:
++    """For every v4l2src that is a CRU camera: re-init its media pipe and make
++    sure a size+format capsfilter follows (injected when the user didn't)."""
++    if "v4l2src" not in pipeline_str:
++        return pipeline_str
++    segs = pipeline_str.split(" ! ")
++    inserts: list[tuple[int, str]] = []
++    for i, s in enumerate(segs):
++        t = s.strip()
++        if not t.startswith("v4l2src"):
++            continue
++        dm = re.search(r"\bdevice=(\S+)", t)
++        dev = dm.group(1) if dm else "/dev/video0"
++        media = _cru_media_for(dev)
++        if not media:
++            continue  # UVC or other devices negotiate on their own
++        nxt = segs[i + 1].strip() if i + 1 < len(segs) else ""
++        wm = re.search(r"width=(?:\(int\))?(\d+)", nxt) if nxt.startswith("video/x-raw") else None
++        hm = re.search(r"height=(?:\(int\))?(\d+)", nxt) if nxt.startswith("video/x-raw") else None
++        if wm and hm:
++            w, h = int(wm.group(1)), int(hm.group(1))
++        else:
++            w, h = _CRU_DEFAULT_SIZE
++            inserts.append((i + 1,
++                            f"video/x-raw,format=UYVY,width={w},height={h}"))
++        _cru_init(media, dev, w, h)
++    for idx, cap in sorted(inserts, reverse=True):
++        segs.insert(idx, cap)
++    return " ! ".join(segs)
++
++
+ # Whether the GI bindings are available
+ _gst_available = False
+ Gst = None
+@@ -496,6 +593,7 @@ class PipelineManager:
+ 
+             try:
+                 _gst_env.refresh_plugin_environment(Gst)
++                pipeline_str = _prepare_v4l2_sources(pipeline_str)
+                 self._pipeline = Gst.parse_launch(pipeline_str)
+             except GLib.Error as e:
+                 self._pipeline = None
+-- 
+2.47.1.windows.1
+
+
+From ab15cef68e3e55ce1b0bf725fe3ec8c8fa1d05dd Mon Sep 17 00:00:00 2001
+From: Dvir <dvir.chakim@gmail.com>
+Date: Sun, 8 Nov 2026 14:04:44 +0200
+Subject: [PATCH 4/4] fix(stream): resolve v4l2 device symlinks in CRU media
+ lookup
+
+Video indices are unstable across boots (UVC may probe before CRU), so
+users will pick /dev/v4l/by-path or by-id names. Compare realpaths when
+matching a v4l2src device to its media topology's CRU output node.
+---
+ dx-ai-studio/dx_stream/core/pipeline.py | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/dx-ai-studio/dx_stream/core/pipeline.py b/dx-ai-studio/dx_stream/core/pipeline.py
+index a1cc8af..c5389ab 100644
+--- a/dx-ai-studio/dx_stream/core/pipeline.py
++++ b/dx-ai-studio/dx_stream/core/pipeline.py
+@@ -54,13 +54,20 @@ _CRU_DEFAULT_SIZE = (1920, 1080)
+ 
+ 
+ def _cru_media_for(dev_node: str) -> str | None:
+-    """Return the /dev/mediaX whose 'CRU output' entity is `dev_node`, else None."""
++    """Return the /dev/mediaX whose 'CRU output' entity is `dev_node`, else None.
++    dev_node may be a /dev/videoN node or a /dev/v4l/by-{path,id} symlink —
++    video indices are unstable across boots, so resolve symlinks first."""
++    try:
++        real = os.path.realpath(dev_node)
++    except Exception:
++        real = dev_node
+     for mp in sorted(Path("/dev").glob("media*")):
+         try:
+             r = subprocess.run(
+                 ["media-ctl", "-d", str(mp), "-e", "CRU output"],
+                 capture_output=True, text=True, timeout=5)
+-            if r.returncode == 0 and r.stdout.strip().split()[:1] == [dev_node]:
++            node = r.stdout.strip().split()[0] if r.stdout.strip() else ""
++            if r.returncode == 0 and node and os.path.realpath(node) == real:
+                 return str(mp)
+         except Exception:
+             continue
 -- 
 2.47.1.windows.1
 
